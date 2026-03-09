@@ -16,13 +16,25 @@ import DutyDashboard from './pages/DutyDashboard';
 import AllReports from './pages/AllReports';
 import Settings from './pages/Settings';
 import { getTeacherWithAssignments, expireOldDuties } from './utils/teacherUtils';
-import { Menu } from 'lucide-react';
+import { Menu, Moon, Sun } from 'lucide-react';
 import './index.css';
 
 function App() {
   const [user, setUser] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [darkMode, setDarkMode] = useState(() => {
+    return localStorage.getItem('darkMode') === 'true';
+  });
+
+  useEffect(() => {
+    if (darkMode) {
+      document.body.classList.add('dark-mode');
+    } else {
+      document.body.classList.remove('dark-mode');
+    }
+    localStorage.setItem('darkMode', darkMode);
+  }, [darkMode]);
 
   useEffect(() => {
     const savedUser = localStorage.getItem('user');
@@ -124,6 +136,14 @@ function App() {
             </div>
           </div>
           <div className="user-info">
+            <button
+              className="dark-mode-btn"
+              onClick={() => setDarkMode(!darkMode)}
+              title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {darkMode ? <Sun size={20} /> : <Moon size={20} />}
+            </button>
             <div>
               <div style={{ fontWeight: '600', fontSize: '14px' }}>{user.name}</div>
               <div style={{ fontSize: '12px', color: 'var(--text-gray)' }}>

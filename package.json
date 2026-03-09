@@ -8,6 +8,7 @@
     "start": "npx electron main.js",
     "react-start": "react-scripts start",
     "build": "react-scripts build",
+    "test": "react-scripts test --watchAll=false",
     "build:mobile": "react-scripts build && npx cap sync android",
     "package": "npm run build && electron-builder build --win --publish never",
     "package-dir": "npm run build && electron-builder build --win --dir"
