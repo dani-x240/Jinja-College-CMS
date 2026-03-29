@@ -5,6 +5,13 @@ set -euo pipefail
 # Ensure web assets are copied into the native Android project before Gradle packages
 
 echo "== Appflow before-package: copy web assets into android/ =="
+
+# Remove stale native web assets if any (safety) then copy
+if [ -d android/app/src/main/assets/public ]; then
+  echo "(before-package) removing stale native web assets"
+  rm -rf android/app/src/main/assets/public
+fi
+
 npx cap copy android
 
 echo "== Sanity check: index.html location =="
