@@ -8,3 +8,5 @@ android/app/build
 android/.gradle
 android/build
 installer_output
+keys/
+*.jks
