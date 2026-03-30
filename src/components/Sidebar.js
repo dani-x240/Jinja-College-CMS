@@ -12,10 +12,12 @@ import {
   LogOut
 } from 'lucide-react';
 import { supabase } from '../utils/supabase';
+import { parseAssignedClasses } from '../utils/classAssignments';
 
 export default function Sidebar({ collapsed, setCollapsed, activeTab, setActiveTab, user, onLogout }) {
   const [hasDuty, setHasDuty] = useState(false);
   const [isDutyHead, setIsDutyHead] = useState(false);
+  const classTeacherAssignments = parseAssignedClasses(user.class_teacher_assigned);
 
   useEffect(() => {
     if (user.role !== 'admin') {
@@ -44,34 +46,32 @@ export default function Sidebar({ collapsed, setCollapsed, activeTab, setActiveT
   };
 
   const baseNavItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard }
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, featureType: 'base' }
   ];
 
   const teacherOnlyItems = user.role !== 'admin' ? [
-    { id: 'students', label: 'View Students', icon: Users },
-    { id: 'submit-report', label: 'Submit Report', icon: ClipboardList },
-    { id: 'my-reports', label: 'My Reports', icon: FileText },
-    { id: 'settings', label: 'Settings', icon: Settings }
+    { id: 'students', label: 'View Students', icon: Users, featureType: 'teacher' },
+    { id: 'reports', label: 'Reports', icon: FileText, featureType: 'teacher' },
+    { id: 'settings', label: 'Settings', icon: Settings, featureType: 'teacher' }
   ] : [];
 
-  const classTeacherItems = user.class_assigned ? [
-    { id: 'my-class', label: 'My Class', icon: UserCheck },
-    { id: 'attendance', label: 'Attendance', icon: Calendar },
-    { id: 'sms', label: 'Send SMS', icon: MessageSquare },
-    { id: 'class-reports', label: 'Class Reports', icon: FileText }
+  const classTeacherItems = classTeacherAssignments.length > 0 ? [
+    { id: 'my-class', label: 'My Class', icon: UserCheck, featureType: 'class-teacher' },
+    { id: 'attendance', label: 'Attendance', icon: Calendar, featureType: 'class-teacher' },
+    { id: 'sms', label: 'Send SMS', icon: MessageSquare, featureType: 'class-teacher' }
   ] : [];
 
   const dutyItems = hasDuty ? [
-    { id: 'duty', label: isDutyHead ? 'Duty Dashboard (HEAD)' : 'Duty Dashboard', icon: ClipboardList }
+    { id: 'duty', label: isDutyHead ? 'Duty Dashboard (HEAD)' : 'Duty Dashboard', icon: ClipboardList, featureType: 'duty' }
   ] : [];
 
   const adminItems = user.role === 'admin' ? [
-    { id: 'manage-students', label: 'Students', icon: Users },
-    { id: 'teachers', label: 'Teachers', icon: Users },
-    { id: 'classes', label: 'Classes', icon: Calendar },
-    { id: 'duty-management', label: 'Duty Management', icon: Calendar },
-    { id: 'reports', label: 'All Reports', icon: FileText },
-    { id: 'settings', label: 'Settings', icon: Settings }
+    { id: 'manage-students', label: 'Students', icon: Users, featureType: 'admin' },
+    { id: 'teachers', label: 'Teachers', icon: Users, featureType: 'admin' },
+    { id: 'classes', label: 'Classes', icon: Calendar, featureType: 'admin' },
+    { id: 'duty-management', label: 'Duty Management', icon: Calendar, featureType: 'admin' },
+    { id: 'reports', label: 'All Reports', icon: FileText, featureType: 'admin' },
+    { id: 'settings', label: 'Settings', icon: Settings, featureType: 'admin' }
   ] : [];
 
   const navItems = user.role === 'admin' 
@@ -81,7 +81,7 @@ export default function Sidebar({ collapsed, setCollapsed, activeTab, setActiveT
   return (
     <div className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       <div className="sidebar-header">
-        <div className="sidebar-title">Jinja CMS</div>
+        <div className="sidebar-title">Jinja College cmc</div>
         <button className="hamburger-btn" onClick={() => setCollapsed(!collapsed)}>
           <Menu size={20} />
         </button>
@@ -91,7 +91,7 @@ export default function Sidebar({ collapsed, setCollapsed, activeTab, setActiveT
         {navItems.map(item => (
           <div
             key={item.id}
-            className={`nav-item ${activeTab === item.id ? 'active' : ''}`}
+            className={`nav-item ${item.featureType ? `feature-${item.featureType}` : ''} ${activeTab === item.id ? 'active' : ''}`}
             onClick={() => {
               setActiveTab(item.id);
               if (window.innerWidth <= 768) setCollapsed(true);
