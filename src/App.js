@@ -26,6 +26,8 @@ import {
   isSecurityQuestionSchemaMissing,
   validateSecurityQuestionState
 } from './utils/securityQuestions';
+import { fetchAppConfig } from './utils/appConfig';
+import { CURRENT_APP_VERSION } from './config/appVersion';
 import { Menu } from 'lucide-react';
 import './index.css';
 
@@ -37,6 +39,9 @@ function App() {
   const [securitySetupSaving, setSecuritySetupSaving] = useState(false);
   const [securitySetupError, setSecuritySetupError] = useState('');
   const [securityQuestionsEnabled, setSecurityQuestionsEnabled] = useState(false);
+  const [appGateState, setAppGateState] = useState('checking'); // 'checking' | 'blocked' | 'ready'
+  const [appConfig, setAppConfig] = useState(null);
+  const [appGateError, setAppGateError] = useState(null);
 
   const refreshSecurityQuestionAvailability = async () => {
     const isAvailable = await checkSecurityQuestionSchemaAvailability(supabase);
@@ -44,8 +49,37 @@ function App() {
     return isAvailable;
   };
 
+  const checkForcedUpdate = async () => {
+    try {
+      const config = await fetchAppConfig();
+      setAppConfig(config);
+
+      if (!config) {
+        // In development, if app_config row doesn't exist, allow the app
+        console.warn('App config not found - development mode');
+        setAppGateState('ready');
+        return true;
+      }
+
+      if (config.version === CURRENT_APP_VERSION) {
+        setAppGateState('ready');
+        return true;
+      } else {
+        setAppGateState('blocked');
+        return false;
+      }
+    } catch (error) {
+      console.error('Version check failed:', error);
+      // Allow app in development mode if check fails
+      setAppGateError(error.message);
+      setAppGateState('ready');
+      return true;
+    }
+  };
+
   useEffect(() => {
     const initializeApp = async () => {
+      await checkForcedUpdate();
       await refreshSecurityQuestionAvailability();
 
       const savedUser = localStorage.getItem('user');
@@ -60,8 +94,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const handleWindowFocus = () => {
-      refreshSecurityQuestionAvailability();
+    const handleWindowFocus = async () => {
+      await checkForcedUpdate();
+      await refreshSecurityQuestionAvailability();
     };
 
     window.addEventListener('focus', handleWindowFocus);
@@ -69,7 +104,7 @@ function App() {
     return () => {
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, []);
+  }, [appGateState]);
 
   const refreshUserData = async (userId) => {
     const freshData = await getTeacherWithAssignments(userId);
@@ -136,6 +171,59 @@ function App() {
 
     await refreshUserData(user.id);
   };
+
+  if (appGateState === 'checking') {
+    return (
+      <div className="force-update-screen">
+        <div className="force-update-card">
+          <div style={{ textAlign: 'center', padding: '20px' }}>
+            <div style={{ fontSize: '18px', fontWeight: '600', marginBottom: '10px' }}>Checking for updates...</div>
+            <div style={{ fontSize: '14px', color: 'var(--text-gray)' }}>Please wait</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (appGateState === 'blocked') {
+    return (
+      <div className="force-update-screen">
+        <div className="force-update-card">
+          <div className="force-update-badge danger">UPDATE REQUIRED</div>
+          <h2 style={{ margin: '20px 0 12px', fontSize: '24px', fontWeight: '700' }}>New Version Available</h2>
+          <p style={{ margin: '0 0 24px', color: 'var(--text-gray)', lineHeight: '1.6' }}>
+            A new version of the app is available. Please download and install the latest version to continue.
+          </p>
+          
+          <div className="force-update-details">
+            <div>
+              <div style={{ fontSize: '12px', color: 'var(--text-gray)', marginBottom: '4px' }}>Current Version</div>
+              <div style={{ fontSize: '16px', fontWeight: '600' }}>{CURRENT_APP_VERSION}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '12px', color: 'var(--text-gray)', marginBottom: '4px' }}>Latest Version</div>
+              <div style={{ fontSize: '16px', fontWeight: '600' }}>{appConfig?.version || 'N/A'}</div>
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              if (appConfig?.apk_url) {
+                window.location.href = appConfig.apk_url;
+              }
+            }}
+            className="force-update-button"
+          >
+            Download Latest Version
+          </button>
+
+          <div style={{ marginTop: '16px', fontSize: '12px', color: 'var(--text-gray)', textAlign: 'center' }}>
+            You must upgrade to continue using the app.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     return (

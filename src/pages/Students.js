@@ -101,6 +101,11 @@ export default function Students({ user }) {
     return value || 'Not specified';
   };
 
+  const getSchoolId = (student, index) => {
+    if (student.admission_no) return student.admission_no;
+    return `JICO/${String(index + 1).padStart(4, '0')}`;
+  };
+
   const normalizeStudentRecord = (student) => ({
     ...student,
     admission_no: student.admission_no || `STU-${student.id}`,
@@ -215,7 +220,7 @@ export default function Students({ user }) {
             .maybeSingle();
 
           if (existing) {
-            alert('⚠️ Admission number already exists. Please use a different number.');
+            alert('⚠️ School ID already exists. Please use a different ID.');
             setLoading(false);
             return;
           }
@@ -636,7 +641,7 @@ export default function Students({ user }) {
           <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImport} style={{ display: 'none' }} />
         </label>
         <div style={{ display: 'flex', alignItems: 'center', color: 'var(--text-gray)', fontSize: '12px', padding: '0 4px' }}>
-          Accepts Excel or CSV with: Name, Class, Stream, Parent Contact. Admission number is optional.
+          Accepts Excel or CSV with: Name, Class, Stream, Parent Contact. School ID is optional.
         </div>
         {selectedStudents.length > 0 && user.role === 'admin' && (
           <button className="btn-secondary" onClick={bulkDelete} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: '#fee2e2', color: '#dc2626' }}>
@@ -657,7 +662,7 @@ export default function Students({ user }) {
                   </button>
                 </th>
               )}
-              <th>Admission No</th>
+              <th>School ID</th>
               <th>Full Name</th>
               <th>Gender</th>
               <th>Class</th>
@@ -681,7 +686,7 @@ export default function Students({ user }) {
                 </td>
               </tr>
             ) : (
-              filteredStudents.map(student => (
+              filteredStudents.map((student, index) => (
                 <tr key={student.id}>
                   {user.role === 'admin' && (
                     <td>
@@ -690,7 +695,7 @@ export default function Students({ user }) {
                       </button>
                     </td>
                   )}
-                  <td>{student.admission_no}</td>
+                  <td>{getSchoolId(student, index)}</td>
                   <td style={{ fontWeight: '600' }}>{student.full_name}</td>
                   <td>{student.gender}</td>
                   <td>{student.class_name}</td>
@@ -726,13 +731,13 @@ export default function Students({ user }) {
             <form onSubmit={handleSubmit}>
               {studentSchema.admission_no && (
               <div className="form-group">
-                <label className="form-label">Admission Number *</label>
+                <label className="form-label">School ID *</label>
                 <input
                   type="text"
                   className="form-input"
                   value={formData.admission_no}
                   onChange={(e) => setFormData({...formData, admission_no: e.target.value})}
-                  placeholder="STU001"
+                  placeholder="JICO/0001"
                   required
                   disabled={editingStudent}
                 />
