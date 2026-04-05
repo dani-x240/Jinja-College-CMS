@@ -60,10 +60,22 @@ jobs:
 
       - name: Build debug APK
         run: |
+          set -eo pipefail
           chmod +x android/gradlew
           cd android
-          ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" --version
-          ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" assembleDebug --stacktrace
+          ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" --version 2>&1 | tee ../gradle-version.log
+          ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" assembleDebug --stacktrace --info 2>&1 | tee ../gradle-build.log
+
+      - name: Upload Gradle diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-diagnostics
+          path: |
+            android/build/reports/problems/**
+            gradle-version.log
+            gradle-build.log
+          if-no-files-found: warn
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
