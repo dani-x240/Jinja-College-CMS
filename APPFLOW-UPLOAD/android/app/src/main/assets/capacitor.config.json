@@ -1,0 +1,8 @@
+{
+	"appId": "com.jinjacollege.cms",
+	"appName": "Jinja College CMS",
+	"webDir": "build",
+	"server": {
+		"androidScheme": "https"
+	}
+}
