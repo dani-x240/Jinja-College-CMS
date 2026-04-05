@@ -28,12 +28,17 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+          check-latest: true
 
       - name: Show toolchain info
         run: |
           node -v
           npm -v
+          echo "JAVA_HOME=${JAVA_HOME}"
+          which java
+          which javac
           java -version
+          javac -version
           echo "ANDROID_HOME=${ANDROID_HOME}"
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
 
@@ -57,7 +62,8 @@ jobs:
         run: |
           chmod +x android/gradlew
           cd android
-          ./gradlew assembleDebug
+          ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" --version
+          ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" assembleDebug --stacktrace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
