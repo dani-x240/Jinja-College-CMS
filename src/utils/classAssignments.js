@@ -1,32 +1,39 @@
-/**
- * Parse assigned classes from string format to array
- * Handles formats like "Form 1" or "Form 1, Form 2, Form 3"
- * @param {string} assignedClasses - Comma or dash separated class names
- * @returns {array} Array of class names
- */
-export const parseAssignedClasses = (assignedClasses) => {
-  if (!assignedClasses) return [];
-  if (Array.isArray(assignedClasses)) return assignedClasses;
-  
-  // Split by comma or dash and trim whitespace
-  return assignedClasses
-    .split(/[,\-]/)
-    .map(c => c.trim())
-    .filter(c => c.length > 0);
+export const normalizeClassValue = (value = '') =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+export const parseAssignedClasses = (value) => {
+  if (!value) return [];
+
+  if (Array.isArray(value)) {
+    return value.map((item) => `${item || ''}`.trim()).filter(Boolean);
+  }
+
+  return `${value}`
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 };
 
-/**
- * Check if a class name matches assigned classes
- * @param {string} className - The class to check
- * @param {string} assignedClasses - Comma or dash separated assigned classes
- * @returns {boolean} True if className is in assignedClasses
- */
-export const classMatches = (className, assignedClasses) => {
-  if (!className || !assignedClasses) return false;
-  
-  const assigned = parseAssignedClasses(assignedClasses);
-  return assigned.some(
-    assignedClass =>
-      assignedClass.toLowerCase() === className.toLowerCase().trim()
+export const stringifyAssignedClasses = (classes = []) => {
+  const unique = [...new Set(classes.map((item) => `${item || ''}`.trim()).filter(Boolean))];
+  return unique.join(', ');
+};
+
+export const classMatches = (candidate = '', assigned = '') => {
+  const candidateValue = normalizeClassValue(candidate);
+  const assignedValue = normalizeClassValue(assigned);
+
+  if (!candidateValue || !assignedValue) return false;
+
+  return (
+    candidateValue === assignedValue ||
+    candidateValue.startsWith(`${assignedValue} `) ||
+    assignedValue.startsWith(`${candidateValue} `)
   );
 };
+
+export const matchesAnyAssignedClass = (candidate = '', assignedClasses = []) =>
+  assignedClasses.some((assignedClass) => classMatches(candidate, assignedClass));

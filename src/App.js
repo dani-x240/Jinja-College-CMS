@@ -12,6 +12,7 @@ import MyReports from './pages/MyReports';
 import MyClass from './pages/MyClass';
 import SMSPage from './pages/SMSPage';
 import ClassReports from './pages/ClassReports';
+import ReportsHub from './pages/ReportsHub';
 import DutyDashboard from './pages/DutyDashboard';
 import AllReports from './pages/AllReports';
 import Settings from './pages/Settings';
@@ -26,8 +27,10 @@ import {
   isSecurityQuestionSchemaMissing,
   validateSecurityQuestionState
 } from './utils/securityQuestions';
-import { fetchAppConfig } from './utils/appConfig';
-import { CURRENT_APP_VERSION } from './config/appVersion';
+import { parseAssignedClasses } from './utils/classAssignments';
+import { runAutoSubmissionPipeline } from './utils/autoSubmission';
+import { loadAppUpdatingState, isVersionBelowMinimum } from './utils/appConfig';
+import { APP_VERSION } from './utils/appVersion';
 import { Menu } from 'lucide-react';
 import './index.css';
 
@@ -35,13 +38,37 @@ function App() {
   const [user, setUser] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [selectedClassFilter, setSelectedClassFilter] = useState('');
   const [securitySetupData, setSecuritySetupData] = useState(createEmptySecurityQuestionState());
   const [securitySetupSaving, setSecuritySetupSaving] = useState(false);
   const [securitySetupError, setSecuritySetupError] = useState('');
   const [securityQuestionsEnabled, setSecurityQuestionsEnabled] = useState(false);
-  const [appGateState, setAppGateState] = useState('checking'); // 'checking' | 'blocked' | 'ready'
-  const [appConfig, setAppConfig] = useState(null);
-  const [appGateError, setAppGateError] = useState(null);
+  const [passwordResetRequired, setPasswordResetRequired] = useState(false);
+  const [passwordResetData, setPasswordResetData] = useState({
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [passwordResetSaving, setPasswordResetSaving] = useState(false);
+  const [passwordResetError, setPasswordResetError] = useState('');
+  const [appUpdatingState, setAppUpdatingState] = useState({
+    loading: true,
+    enabled: false,
+    message: 'School system is updating... Please wait a moment.',
+    forceUpdate: false,
+    minimumSupportedVersion: '0.0.0',
+    updateDownloadUrl: '',
+    updateRequiredMessage: 'A new version of this app is available. Please update to continue.'
+  });
+
+  const refreshAppUpdating = async () => {
+    try {
+      const state = await loadAppUpdatingState();
+      setAppUpdatingState({ loading: false, ...state });
+    } catch (error) {
+      console.error('Failed to load app updating state:', error);
+      setAppUpdatingState((prev) => ({ ...prev, loading: false }));
+    }
+  };
 
   const refreshSecurityQuestionAvailability = async () => {
     const isAvailable = await checkSecurityQuestionSchemaAvailability(supabase);
@@ -49,37 +76,12 @@ function App() {
     return isAvailable;
   };
 
-  const checkForcedUpdate = async () => {
-    try {
-      const config = await fetchAppConfig();
-      setAppConfig(config);
-
-      if (!config) {
-        // In development, if app_config row doesn't exist, allow the app
-        console.warn('App config not found - development mode');
-        setAppGateState('ready');
-        return true;
-      }
-
-      if (config.version === CURRENT_APP_VERSION) {
-        setAppGateState('ready');
-        return true;
-      } else {
-        setAppGateState('blocked');
-        return false;
-      }
-    } catch (error) {
-      console.error('Version check failed:', error);
-      // Allow app in development mode if check fails
-      setAppGateError(error.message);
-      setAppGateState('ready');
-      return true;
-    }
-  };
-
   useEffect(() => {
     const initializeApp = async () => {
-      await checkForcedUpdate();
+      const savedTheme = localStorage.getItem('themeMode') || 'light';
+      document.body.dataset.theme = savedTheme;
+
+      await refreshAppUpdating();
       await refreshSecurityQuestionAvailability();
 
       const savedUser = localStorage.getItem('user');
@@ -94,9 +96,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const handleWindowFocus = async () => {
-      await checkForcedUpdate();
-      await refreshSecurityQuestionAvailability();
+    const handleWindowFocus = () => {
+      refreshAppUpdating();
+      refreshSecurityQuestionAvailability();
+
+      const savedUser = localStorage.getItem('user');
+      if (savedUser) {
+        const parsedUser = JSON.parse(savedUser);
+        if (parsedUser?.id) {
+          refreshUserData(parsedUser.id);
+        }
+      }
     };
 
     window.addEventListener('focus', handleWindowFocus);
@@ -104,7 +114,42 @@ function App() {
     return () => {
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [appGateState]);
+  }, []);
+
+  useEffect(() => {
+    if (!user?.id || user.role !== 'admin') return;
+
+    const refreshTimer = setInterval(() => {
+      refreshUserData(user.id);
+    }, 60000);
+
+    return () => clearInterval(refreshTimer);
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    const refreshTimer = setInterval(() => {
+      refreshAppUpdating();
+    }, 60000);
+
+    return () => clearInterval(refreshTimer);
+  }, []);
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const runPipeline = async () => {
+      try {
+        await runAutoSubmissionPipeline();
+      } catch (error) {
+        console.error('Auto submission pipeline failed:', error);
+      }
+    };
+
+    runPipeline();
+    const autoSubmissionTimer = setInterval(runPipeline, 3 * 60 * 1000);
+
+    return () => clearInterval(autoSubmissionTimer);
+  }, [user?.id]);
 
   const refreshUserData = async (userId) => {
     const freshData = await getTeacherWithAssignments(userId);
@@ -124,6 +169,12 @@ function App() {
     localStorage.removeItem('user');
     setUser(null);
     setActiveTab('dashboard');
+    setSelectedClassFilter('');
+  };
+
+  const handleNavigateWithClassFilter = (targetTab, className) => {
+    setSelectedClassFilter(className || '');
+    setActiveTab(targetTab);
   };
 
   const requiresSecuritySetup = securityQuestionsEnabled && user && !hasSecurityQuestionsConfigured(user);
@@ -134,6 +185,55 @@ function App() {
       setSecuritySetupError('');
     }
   }, [requiresSecuritySetup, user?.id]);
+
+  useEffect(() => {
+    if (user) {
+      const requiresReset = localStorage.getItem('passwordResetRequired') === 'true';
+      setPasswordResetRequired(requiresReset);
+
+      if (requiresReset) {
+        setPasswordResetData({ newPassword: '', confirmPassword: '' });
+        setPasswordResetError('');
+      }
+    }
+  }, [user?.id]);
+
+  const handlePasswordResetSubmit = async (e) => {
+    e.preventDefault();
+
+    if (!passwordResetData.newPassword || !passwordResetData.confirmPassword) {
+      setPasswordResetError('Please enter and confirm your new password.');
+      return;
+    }
+
+    if (passwordResetData.newPassword.length < 6) {
+      setPasswordResetError('New password must be at least 6 characters.');
+      return;
+    }
+
+    if (passwordResetData.newPassword !== passwordResetData.confirmPassword) {
+      setPasswordResetError('Passwords do not match.');
+      return;
+    }
+
+    setPasswordResetSaving(true);
+    setPasswordResetError('');
+
+    const { error } = await supabase
+      .from('teachers')
+      .update({ password: passwordResetData.newPassword })
+      .eq('id', user.id);
+
+    setPasswordResetSaving(false);
+
+    if (error) {
+      setPasswordResetError(error.message || 'Failed to update password.');
+      return;
+    }
+
+    localStorage.removeItem('passwordResetRequired');
+    setPasswordResetRequired(false);
+  };
 
   const handleSecuritySetupSubmit = async (e) => {
     e.preventDefault();
@@ -172,53 +272,67 @@ function App() {
     await refreshUserData(user.id);
   };
 
-  if (appGateState === 'checking') {
+  // Do not block the whole UI while checking remote config —
+  // show normal app immediately.
+  // Maintenance or forced-update screens will still render once `appUpdatingState` is loaded.
+
+  if (appUpdatingState.enabled) {
     return (
-      <div className="force-update-screen">
-        <div className="force-update-card">
-          <div style={{ textAlign: 'center', padding: '20px' }}>
-            <div style={{ fontSize: '18px', fontWeight: '600', marginBottom: '10px' }}>Checking for updates...</div>
-            <div style={{ fontSize: '14px', color: 'var(--text-gray)' }}>Please wait</div>
-          </div>
+      <div className="startup-screen startup-screen-maintenance">
+        <div className="startup-card maintenance-card">
+          <div className="maintenance-badge">Maintenance Mode</div>
+          <h1>School System Updating</h1>
+          <p>{appUpdatingState.message}</p>
+          <button
+            type="button"
+            onClick={refreshAppUpdating}
+            className="btn-primary"
+            style={{ margin: '0 auto', justifyContent: 'center', minWidth: '170px' }}
+          >
+            Check Again
+          </button>
         </div>
       </div>
     );
   }
 
-  if (appGateState === 'blocked') {
+  const needsUpdate = appUpdatingState.forceUpdate
+    && isVersionBelowMinimum(APP_VERSION, appUpdatingState.minimumSupportedVersion);
+
+  if (needsUpdate) {
+    const handleDownloadUpdate = () => {
+      if (!appUpdatingState.updateDownloadUrl) return;
+      window.open(appUpdatingState.updateDownloadUrl, '_blank', 'noopener,noreferrer');
+    };
+
     return (
-      <div className="force-update-screen">
-        <div className="force-update-card">
-          <div className="force-update-badge danger">UPDATE REQUIRED</div>
-          <h2 style={{ margin: '20px 0 12px', fontSize: '24px', fontWeight: '700' }}>New Version Available</h2>
-          <p style={{ margin: '0 0 24px', color: 'var(--text-gray)', lineHeight: '1.6' }}>
-            A new version of the app is available. Please download and install the latest version to continue.
+      <div className="startup-screen startup-screen-update-required">
+        <div className="startup-card update-required-card">
+          <div className="maintenance-badge">Update Required</div>
+          <h1>New Version Available</h1>
+          <p>{appUpdatingState.updateRequiredMessage}</p>
+          <p style={{ fontSize: '14px' }}>
+            Current version: <strong>{APP_VERSION}</strong><br />
+            Required version: <strong>{appUpdatingState.minimumSupportedVersion}</strong>
           </p>
-          
-          <div className="force-update-details">
-            <div>
-              <div style={{ fontSize: '12px', color: 'var(--text-gray)', marginBottom: '4px' }}>Current Version</div>
-              <div style={{ fontSize: '16px', fontWeight: '600' }}>{CURRENT_APP_VERSION}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', color: 'var(--text-gray)', marginBottom: '4px' }}>Latest Version</div>
-              <div style={{ fontSize: '16px', fontWeight: '600' }}>{appConfig?.version || 'N/A'}</div>
-            </div>
-          </div>
-
-          <button
-            onClick={() => {
-              if (appConfig?.apk_url) {
-                window.location.href = appConfig.apk_url;
-              }
-            }}
-            className="force-update-button"
-          >
-            Download Latest Version
-          </button>
-
-          <div style={{ marginTop: '16px', fontSize: '12px', color: 'var(--text-gray)', textAlign: 'center' }}>
-            You must upgrade to continue using the app.
+          <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={refreshAppUpdating}
+              className="btn"
+              style={{ minWidth: '150px' }}
+            >
+              Check Again
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadUpdate}
+              className="btn-primary"
+              style={{ minWidth: '180px', justifyContent: 'center' }}
+              disabled={!appUpdatingState.updateDownloadUrl}
+            >
+              Download Update
+            </button>
           </div>
         </div>
       </div>
@@ -242,11 +356,11 @@ function App() {
       case 'students':
         return <Students user={user} />;
       case 'attendance':
-        return <Attendance user={user} />;
+        return <Attendance user={user} selectedClassFilter={selectedClassFilter} />;
       case 'teachers':
-        return <Teachers />;
+        return <Teachers user={user} />;
       case 'classes':
-        return <Classes />;
+        return <Classes onNavigateWithClassFilter={handleNavigateWithClassFilter} />;
       case 'duty-management':
         return <DutyManagement />;
       case 'submit-report':
@@ -256,7 +370,7 @@ function App() {
       case 'my-class':
         return <MyClass user={user} />;
       case 'sms':
-        return <SMSPage user={user} />;
+        return <SMSPage user={user} selectedClassFilter={selectedClassFilter} />;
       case 'class-reports':
         return <ClassReports user={user} />;
       case 'duty':
@@ -264,13 +378,22 @@ function App() {
       case 'manage-students':
         return <Students user={user} />;
       case 'reports':
-        return <AllReports />;
+        return user.role === 'admin'
+          ? <AllReports selectedClassFilter={selectedClassFilter} />
+          : <ReportsHub user={user} />;
       case 'settings':
         return <Settings user={user} onUserRefresh={refreshUserData} />;
       default:
         return <Dashboard user={user} />;
     }
   };
+
+  const classTeacherAssignments = parseAssignedClasses(user.class_teacher_assigned);
+  const userRoleLabel = user.role === 'admin'
+    ? 'Administrator'
+    : classTeacherAssignments.length > 0
+      ? 'Class Teacher'
+      : 'Teacher';
 
   return (
     <div className="app-container">
@@ -298,7 +421,7 @@ function App() {
             <div>
               <div style={{ fontWeight: '600', fontSize: '14px' }}>{user.name}</div>
               <div style={{ fontSize: '12px', color: 'var(--text-gray)' }}>
-                {user.role === 'admin' ? 'Administrator' : 'Teacher'}
+                {userRoleLabel}
               </div>
             </div>
             <div className="user-avatar">
@@ -400,6 +523,49 @@ function App() {
 
               <button type="submit" className="btn-primary" disabled={securitySetupSaving} style={{ justifyContent: 'center' }}>
                 {securitySetupSaving ? 'Saving Questions...' : 'Save And Continue'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {passwordResetRequired && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.74)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px', zIndex: 3100 }}>
+          <div style={{ width: '100%', maxWidth: '460px', background: '#ffffff', borderRadius: '18px', padding: '24px', boxShadow: '0 24px 60px rgba(15, 23, 42, 0.28)' }}>
+            <h2 style={{ margin: 0, fontSize: '22px', fontWeight: '700', color: 'var(--text-dark)' }}>Set A New Password</h2>
+            <p style={{ margin: '10px 0 16px', color: 'var(--text-gray)', lineHeight: '1.6' }}>
+              You signed in using password recovery. Please set a new password to continue.
+            </p>
+
+            {passwordResetError && (
+              <div style={{ background: '#fee2e2', color: '#991b1b', padding: '10px 12px', borderRadius: '8px', marginBottom: '12px' }}>
+                {passwordResetError}
+              </div>
+            )}
+
+            <form onSubmit={handlePasswordResetSubmit} style={{ display: 'grid', gap: '12px' }}>
+              <div>
+                <label className="form-label">New Password</label>
+                <input
+                  type="password"
+                  className="form-input"
+                  value={passwordResetData.newPassword}
+                  onChange={(e) => setPasswordResetData({ ...passwordResetData, newPassword: e.target.value })}
+                  required
+                />
+              </div>
+              <div>
+                <label className="form-label">Confirm New Password</label>
+                <input
+                  type="password"
+                  className="form-input"
+                  value={passwordResetData.confirmPassword}
+                  onChange={(e) => setPasswordResetData({ ...passwordResetData, confirmPassword: e.target.value })}
+                  required
+                />
+              </div>
+              <button type="submit" className="btn-primary" disabled={passwordResetSaving} style={{ justifyContent: 'center' }}>
+                {passwordResetSaving ? 'Saving...' : 'Save New Password'}
               </button>
             </form>
           </div>

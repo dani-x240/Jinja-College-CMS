@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { classMatches, parseAssignedClasses } from './classAssignments';
 
 // Auto-expire duties that have passed their end date
 export const expireOldDuties = async () => {
@@ -64,30 +65,54 @@ export const getTeacherWithAssignments = async (teacherId) => {
 // Validate class assignment
 export const validateClassAssignment = async (className) => {
   if (!className) return true; // Empty is valid (no assignment)
-  
-  const { data, error } = await supabase
-    .from('classes')
-    .select('id')
-    .eq('name', className)
-    .single();
-  
-  return !error && data;
+
+  const trimmedClassName = className.trim();
+  if (!trimmedClassName) return true;
+
+  const [{ data: classesData }, { data: streamsData }] = await Promise.all([
+    supabase.from('classes').select('id, name'),
+    supabase.from('streams').select('id, class_id, name')
+  ]);
+
+  const classes = classesData || [];
+  const streams = streamsData || [];
+
+  if (classes.some((classItem) => classMatches(classItem.name || '', trimmedClassName))) {
+    return true;
+  }
+
+  for (const stream of streams) {
+    const classItem = classes.find((item) => item.id === stream.class_id);
+    if (!classItem) continue;
+
+    const streamLabel = `${classItem.name} ${stream.name}`.trim();
+    if (classMatches(streamLabel, trimmedClassName)) {
+      return true;
+    }
+  }
+
+  return false;
 };
 
 // Check if class is already assigned to another teacher
 export const isClassAlreadyAssigned = async (className, excludeTeacherId = null) => {
   if (!className) return false;
-  
+
   let query = supabase
     .from('teachers')
-    .select('id')
-    .eq('class_assigned', className);
+    .select('id, class_assigned');
   
   if (excludeTeacherId) {
     query = query.neq('id', excludeTeacherId);
   }
   
-  const { data, error } = await query.single();
-  
-  return !error && data;
+  const { data, error } = await query;
+
+  if (error || !data) {
+    return false;
+  }
+
+  return data.some((teacher) =>
+    parseAssignedClasses(teacher.class_assigned).some((assignedClass) => classMatches(assignedClass, className))
+  );
 };

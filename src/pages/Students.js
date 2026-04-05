@@ -2,8 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { Search, Plus, Edit, Trash2, X, Check, Download, Filter, CheckSquare, Square, Upload } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from '../utils/supabase';
+import { matchesAnyAssignedClass, parseAssignedClasses } from '../utils/classAssignments';
 
 export default function Students({ user }) {
+  const assignedClasses = parseAssignedClasses(user.class_assigned);
+  const isAdmin = user.role === 'admin';
+  const canManageStudents = isAdmin;
   const defaultStudentSchema = {
     admission_no: true,
     full_name: true,
@@ -28,8 +32,10 @@ export default function Students({ user }) {
   const [streams, setStreams] = useState([]);
   const [selectedStudents, setSelectedStudents] = useState([]);
   const [filterClass, setFilterClass] = useState('');
+  const [filterStream, setFilterStream] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
   const [filterGender, setFilterGender] = useState('');
+  const [importMode, setImportMode] = useState('add');
   const [studentSchema, setStudentSchema] = useState(defaultStudentSchema);
   const [formData, setFormData] = useState({
     admission_no: '',
@@ -101,11 +107,6 @@ export default function Students({ user }) {
     return value || 'Not specified';
   };
 
-  const getSchoolId = (student, index) => {
-    if (student.admission_no) return student.admission_no;
-    return `JICO/${String(index + 1).padStart(4, '0')}`;
-  };
-
   const normalizeStudentRecord = (student) => ({
     ...student,
     admission_no: student.admission_no || `STU-${student.id}`,
@@ -124,8 +125,20 @@ export default function Students({ user }) {
           ? 75
           : student.category === 'red'
             ? 50
-            : 0
+            : 95
   });
+
+  const getCategoryFromStudent = (student) => {
+    if (typeof student.attendance_percentage === 'number') {
+      return getCategory(student.attendance_percentage);
+    }
+
+    if (student.category === 'green') return 'Green';
+    if (student.category === 'orange') return 'Orange';
+    if (student.category === 'red') return 'Red';
+
+    return 'Green';
+  };
 
   const normalizeGenderForDatabase = (value = '') => {
     const normalized = normalizeGenderForDisplay(value);
@@ -147,9 +160,26 @@ export default function Students({ user }) {
     if (studentSchema.parent_phone) payload.parent_phone = data.parent_phone;
     if (studentSchema.date_of_birth) payload.date_of_birth = data.date_of_birth || null;
     if (studentSchema.notes) payload.notes = data.notes || '';
-    if (studentSchema.category) payload.category = getCategory(data.attendance_percentage || 95).toLowerCase();
+    if (studentSchema.attendance_percentage) {
+      payload.attendance_percentage = typeof data.attendance_percentage === 'number' ? data.attendance_percentage : 95;
+    }
+    if (studentSchema.category) {
+      payload.category = (data.category || getCategory((typeof data.attendance_percentage === 'number' ? data.attendance_percentage : 95))).toLowerCase();
+    }
 
     return payload;
+  };
+
+  const getExistingStudentIds = async () => {
+    if (!studentSchema.admission_no) return new Set();
+
+    const { data, error } = await supabase
+      .from('students')
+      .select('admission_no');
+
+    if (error) throw error;
+
+    return new Set((data || []).map((item) => item.admission_no).filter(Boolean));
   };
 
   const loadClasses = async () => {
@@ -165,18 +195,22 @@ export default function Students({ user }) {
 
   const loadStudents = async (schema = studentSchema) => {
     try {
-      let query = supabase.from('students').select('*');
-      
-      if (user.class_assigned && user.role !== 'admin') {
-        query = schema.class_name
-          ? query.eq('class_name', user.class_assigned)
-          : query.eq('class', user.class_assigned);
-      }
+      const query = supabase.from('students').select('*');
 
       const { data, error } = await query.order(schema.full_name ? 'full_name' : 'name');
       
       if (error) throw error;
-      setStudents((data || []).map(normalizeStudentRecord));
+
+      const normalized = (data || []).map(normalizeStudentRecord);
+      if (isAdmin) {
+        setStudents(normalized);
+      } else {
+        setStudents(
+          normalized.filter((student) =>
+            matchesAnyAssignedClass(student.class_name || '', assignedClasses)
+          )
+        );
+      }
     } catch (error) {
       console.error('Error loading students:', error);
     }
@@ -200,6 +234,12 @@ export default function Students({ user }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (!isAdmin) {
+      alert('Only admin can add or edit students.');
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -212,21 +252,25 @@ export default function Students({ user }) {
         if (error) throw error;
         alert('✅ Student updated successfully!');
       } else {
-        if (studentSchema.admission_no) {
-          const { data: existing } = await supabase
-            .from('students')
-            .select('admission_no')
-            .eq('admission_no', formData.admission_no)
-            .maybeSingle();
+        const payloadData = { ...formData };
 
-          if (existing) {
-            alert('⚠️ School ID already exists. Please use a different ID.');
-            setLoading(false);
-            return;
+        if (studentSchema.admission_no) {
+          const existingStudentIds = await getExistingStudentIds();
+          const suppliedStudentId = (payloadData.admission_no || '').trim();
+
+          if (suppliedStudentId) {
+            if (existingStudentIds.has(suppliedStudentId)) {
+              alert('⚠️ Student ID already exists. Please use a different ID.');
+              setLoading(false);
+              return;
+            }
+            payloadData.admission_no = suppliedStudentId;
+          } else {
+            payloadData.admission_no = generateAdmissionNoFromClass(existingStudentIds, payloadData.class_name, existingStudentIds.size + 1);
           }
         }
 
-        const { error } = await supabase.from('students').insert(buildStudentPayload(formData));
+        const { error } = await supabase.from('students').insert(buildStudentPayload(payloadData));
         if (error) throw error;
         alert('✅ Student added successfully!');
       }
@@ -242,20 +286,70 @@ export default function Students({ user }) {
   };
 
   const handleDelete = async (id) => {
+    if (!isAdmin) {
+      alert('Only admin can delete students.');
+      return;
+    }
+
     if (window.confirm('Are you sure you want to delete this student?')) {
       await supabase.from('students').delete().eq('id', id);
       loadStudents();
     }
   };
 
+  const splitStudentClassAndStream = (value = '') => {
+    const cleanValue = (value || '').trim();
+    if (!cleanValue) {
+      return { classPart: '', streamPart: '' };
+    }
+
+    const knownClassNames = classes
+      .map((classItem) => (classItem.name || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+
+    const matchedClass = knownClassNames.find(
+      (className) => cleanValue === className || cleanValue.startsWith(`${className} `)
+    );
+
+    if (matchedClass) {
+      const streamPart = cleanValue.slice(matchedClass.length).trim();
+      return { classPart: matchedClass, streamPart };
+    }
+
+    const tokens = cleanValue.split(/\s+/).filter(Boolean);
+    return {
+      classPart: tokens[0] || cleanValue,
+      streamPart: tokens.slice(1).join(' ')
+    };
+  };
+
+  const classFilterOptions = [...new Set(
+    students
+      .map((student) => splitStudentClassAndStream(student.class_name).classPart)
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+
+  const streamFilterOptions = [...new Set(
+    students
+      .filter((student) => {
+        if (!filterClass) return true;
+        return splitStudentClassAndStream(student.class_name).classPart === filterClass;
+      })
+      .map((student) => splitStudentClassAndStream(student.class_name).streamPart)
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+
   const filteredStudents = students.filter(s => {
+    const classStream = splitStudentClassAndStream(s.class_name);
     const matchesSearch = (s.full_name || '').toLowerCase().includes(search.toLowerCase()) ||
       (s.admission_no || '').toLowerCase().includes(search.toLowerCase()) ||
       (s.class_name || '').toLowerCase().includes(search.toLowerCase());
-    const matchesClass = !filterClass || s.class_name === filterClass;
+    const matchesClass = !filterClass || classStream.classPart === filterClass;
+    const matchesStream = !filterStream || classStream.streamPart === filterStream;
     const matchesGender = !filterGender || s.gender === filterGender;
-    const matchesCategory = !filterCategory || getCategory(s.attendance_percentage || 0) === filterCategory;
-    return matchesSearch && matchesClass && matchesGender && matchesCategory;
+    const matchesCategory = !filterCategory || getCategoryFromStudent(s) === filterCategory;
+    return matchesSearch && matchesClass && matchesStream && matchesGender && matchesCategory;
   });
 
   const getCategory = (percentage) => {
@@ -266,6 +360,13 @@ export default function Students({ user }) {
 
   const getCategoryBadge = (percentage) => {
     const category = getCategory(percentage);
+    if (category === 'Green') return <span className="badge green">Green</span>;
+    if (category === 'Orange') return <span className="badge orange">Orange</span>;
+    return <span className="badge red">Red</span>;
+  };
+
+  const getCategoryBadgeForStudent = (student) => {
+    const category = getCategoryFromStudent(student);
     if (category === 'Green') return <span className="badge green">Green</span>;
     if (category === 'Orange') return <span className="badge orange">Orange</span>;
     return <span className="badge red">Red</span>;
@@ -334,6 +435,372 @@ export default function Students({ user }) {
     return cleanClass || cleanStream;
   };
 
+  const normalizeComparableValue = (value = '') =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+
+  const compactComparableValue = (value = '') =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+
+  const extractClassNumber = (value = '') => {
+    const match = value.match(/\d+/);
+    return match ? match[0] : '';
+  };
+
+  const looksLikeClassLabel = (value = '') => {
+    const cleanValue = value.trim().toLowerCase();
+    if (!cleanValue) return false;
+
+    if (/^(s|f)\.?\s*\d+$/.test(cleanValue)) return true;
+    if (/^(form|senior)\s*\d+$/.test(cleanValue)) return true;
+    return false;
+  };
+
+  const splitPotentialClassAndStream = (classValue = '', streamValue = '') => {
+    const cleanClass = classValue.trim();
+    const cleanStream = streamValue.trim();
+
+    if (cleanStream) {
+      return { classPart: cleanClass, streamPart: cleanStream };
+    }
+
+    const classTokens = cleanClass.split(/\s+/).filter(Boolean);
+    if (classTokens.length <= 1) {
+      return { classPart: cleanClass, streamPart: '' };
+    }
+
+    const firstToken = classTokens[0];
+    const firstTwoTokens = classTokens.slice(0, 2).join(' ');
+
+    if (looksLikeClassLabel(firstTwoTokens) && classTokens.length > 2) {
+      return {
+        classPart: firstTwoTokens,
+        streamPart: classTokens.slice(2).join(' ')
+      };
+    }
+
+    if (looksLikeClassLabel(firstToken)) {
+      return {
+        classPart: firstToken,
+        streamPart: classTokens.slice(1).join(' ')
+      };
+    }
+
+    const lastToken = classTokens[classTokens.length - 1];
+    const knownStreamExists = streams.some(
+      (streamItem) => normalizeComparableValue(streamItem.name || '') === normalizeComparableValue(lastToken)
+    );
+
+    if (knownStreamExists) {
+      return {
+        classPart: classTokens.slice(0, -1).join(' '),
+        streamPart: lastToken
+      };
+    }
+
+    return { classPart: cleanClass, streamPart: '' };
+  };
+
+  const ensureClassAndStreamExist = async (rows, classIndex, streamIndex) => {
+    let classesBuffer = [...classes];
+    let streamsBuffer = [...streams];
+    let classesCreated = 0;
+    let streamsCreated = 0;
+    let classUpdates = 0;
+
+    const findClassCandidateFromBuffer = (rawClassValue = '') => {
+      const normalizedInput = normalizeComparableValue(rawClassValue);
+      const compactInput = compactComparableValue(rawClassValue);
+      const numberInput = extractClassNumber(rawClassValue);
+
+      if (!normalizedInput && !compactInput) {
+        return null;
+      }
+
+      let fallbackByNumber = null;
+
+      for (const classItem of classesBuffer) {
+        const namesToCheck = [classItem.name || '', classItem.full_name || ''];
+
+        for (const name of namesToCheck) {
+          if (!name) continue;
+
+          const normalizedName = normalizeComparableValue(name);
+          const compactName = compactComparableValue(name);
+
+          if (normalizedName === normalizedInput || compactName === compactInput) {
+            return classItem;
+          }
+
+          if (!fallbackByNumber && numberInput && extractClassNumber(name) === numberInput) {
+            fallbackByNumber = classItem;
+          }
+        }
+      }
+
+      return fallbackByNumber;
+    };
+
+    for (let i = 1; i < rows.length; i += 1) {
+      const cols = rows[i].map((value) => `${value || ''}`.trim());
+      const rawClass = cols[classIndex] || '';
+      const rawStream = streamIndex >= 0 ? cols[streamIndex] || '' : '';
+      const { classPart, streamPart } = splitPotentialClassAndStream(rawClass, rawStream);
+
+      const cleanClass = classPart.trim();
+      const cleanStream = streamPart.trim();
+      if (!cleanClass) continue;
+
+      let classCandidate = findClassCandidateFromBuffer(cleanClass);
+
+      if (!classCandidate) {
+        const { data: createdClass, error: createClassError } = await supabase
+          .from('classes')
+          .insert({
+            name: cleanClass,
+            full_name: cleanClass,
+            has_streams: Boolean(cleanStream)
+          })
+          .select('*')
+          .single();
+
+        if (createClassError) {
+          throw createClassError;
+        }
+
+        classCandidate = createdClass;
+        classesBuffer = [...classesBuffer, createdClass];
+        classesCreated += 1;
+      } else if (cleanStream && !classCandidate.has_streams) {
+        const { data: updatedClass, error: updateClassError } = await supabase
+          .from('classes')
+          .update({ has_streams: true })
+          .eq('id', classCandidate.id)
+          .select('*')
+          .single();
+
+        if (updateClassError) {
+          throw updateClassError;
+        }
+
+        classCandidate = updatedClass;
+        classesBuffer = classesBuffer.map((classItem) =>
+          classItem.id === classCandidate.id ? classCandidate : classItem
+        );
+        classUpdates += 1;
+      }
+
+      if (!cleanStream) {
+        continue;
+      }
+
+      const streamExists = streamsBuffer.some((streamItem) =>
+        streamItem.class_id === classCandidate.id &&
+        normalizeComparableValue(streamItem.name || '') === normalizeComparableValue(cleanStream)
+      );
+
+      if (streamExists) {
+        continue;
+      }
+
+      const { data: createdStream, error: createStreamError } = await supabase
+        .from('streams')
+        .insert({
+          class_id: classCandidate.id,
+          name: cleanStream
+        })
+        .select('*')
+        .single();
+
+      if (createStreamError) {
+        throw createStreamError;
+      }
+
+      streamsBuffer = [...streamsBuffer, createdStream];
+      streamsCreated += 1;
+    }
+
+    if (classesCreated > 0 || streamsCreated > 0 || classUpdates > 0) {
+      await loadClasses();
+    }
+
+    return { classesCreated, streamsCreated, classUpdates };
+  };
+
+  const findBestClassCandidate = (rawClassValue = '') => {
+    const normalizedInput = normalizeComparableValue(rawClassValue);
+    const compactInput = compactComparableValue(rawClassValue);
+    const numberInput = extractClassNumber(rawClassValue);
+
+    if (!normalizedInput && !compactInput) {
+      return null;
+    }
+
+    let fallbackByNumber = null;
+
+    for (const classItem of classes) {
+      const namesToCheck = [classItem.name || '', classItem.full_name || ''];
+
+      for (const name of namesToCheck) {
+        if (!name) continue;
+
+        const normalizedName = normalizeComparableValue(name);
+        const compactName = compactComparableValue(name);
+
+        if (normalizedName === normalizedInput || compactName === compactInput) {
+          return classItem;
+        }
+
+        if (!fallbackByNumber && numberInput && extractClassNumber(name) === numberInput) {
+          fallbackByNumber = classItem;
+        }
+      }
+    }
+
+    return fallbackByNumber;
+  };
+
+  const getCanonicalClassName = (classValue = '', streamValue = '') => {
+    const { classPart, streamPart } = splitPotentialClassAndStream(classValue, streamValue);
+    const cleanClass = classPart.trim();
+    const cleanStream = streamPart.trim();
+
+    if (!cleanClass && !cleanStream) {
+      return '';
+    }
+
+    const classCandidate = findBestClassCandidate(cleanClass);
+
+    if (classCandidate) {
+      if (classCandidate.has_streams) {
+        const availableStreams = streams.filter((stream) => stream.class_id === classCandidate.id);
+
+        if (cleanStream) {
+          const matchedStream = availableStreams.find(
+            (stream) => normalizeComparableValue(stream.name || '') === normalizeComparableValue(cleanStream)
+          );
+
+          if (matchedStream) {
+            return `${classCandidate.name} ${matchedStream.name}`.trim();
+          }
+        }
+
+        if (availableStreams.length === 1) {
+          return `${classCandidate.name} ${availableStreams[0].name}`.trim();
+        }
+
+        return buildImportedClassName(classCandidate.name, cleanStream);
+      }
+
+      return classCandidate.name;
+    }
+
+    const classMap = new Map();
+
+    classes.forEach((classItem) => {
+      const baseName = classItem.name || '';
+
+      if (!baseName) return;
+
+      if (classItem.has_streams) {
+        streams
+          .filter((stream) => stream.class_id === classItem.id)
+          .forEach((stream) => {
+            const combined = `${baseName} ${stream.name}`.trim();
+            classMap.set(normalizeComparableValue(combined), combined);
+          });
+      } else {
+        classMap.set(normalizeComparableValue(baseName), baseName);
+      }
+    });
+
+    const combinedInput = buildImportedClassName(cleanClass, cleanStream);
+    const directMatch = classMap.get(normalizeComparableValue(combinedInput));
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const fromSeparateFields = classMap.get(
+      normalizeComparableValue(`${cleanClass} ${cleanStream}`)
+    );
+    if (fromSeparateFields) {
+      return fromSeparateFields;
+    }
+
+    return combinedInput;
+  };
+
+  const extractAdmissionClassCode = (classValue = '') => {
+    const normalized = classValue.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const classMatch = normalized.match(/(S|F)?\d+/);
+
+    if (classMatch) {
+      const value = classMatch[0];
+      if (/^[0-9]/.test(value)) return `S${value}`;
+      return value;
+    }
+
+    return normalized.slice(0, 3) || 'STU';
+  };
+
+  const extractAdmissionStreamCode = (streamValue = '') => {
+    const normalized = streamValue.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return normalized.slice(0, 1);
+  };
+
+  const splitClassAndStream = (className = '') => {
+    const clean = className.trim();
+    if (!clean) {
+      return { classPart: '', streamPart: '' };
+    }
+
+    const parts = clean.split(/\s+/).filter(Boolean);
+    if (parts.length === 1) {
+      return { classPart: parts[0], streamPart: '' };
+    }
+
+    return {
+      classPart: parts[0],
+      streamPart: parts.slice(1).join(' ')
+    };
+  };
+
+  const generateAdmissionNoFromClass = (existingAdmissionNumbers, className, rowNumber) => {
+    const { classPart, streamPart } = splitClassAndStream(className);
+    const classCode = extractAdmissionClassCode(classPart);
+    const streamCode = extractAdmissionStreamCode(streamPart);
+    const prefix = `${classCode}${streamCode}`;
+
+    const prefixPattern = new RegExp(`^${prefix}(\\d{3})$`);
+    let highestSuffix = 0;
+
+    existingAdmissionNumbers.forEach((value) => {
+      const match = value.match(prefixPattern);
+      if (match) {
+        highestSuffix = Math.max(highestSuffix, Number(match[1]));
+      }
+    });
+
+    let nextSuffix = highestSuffix + 1;
+    let candidate = `${prefix}${String(nextSuffix).padStart(3, '0')}`;
+
+    while (existingAdmissionNumbers.has(candidate)) {
+      nextSuffix += 1;
+      candidate = `${prefix}${String(nextSuffix).padStart(3, '0')}`;
+    }
+
+    if (candidate.length > 18) {
+      return generateImportedAdmissionNo(existingAdmissionNumbers, rowNumber);
+    }
+
+    existingAdmissionNumbers.add(candidate);
+    return candidate;
+  };
+
   const generateImportedAdmissionNo = (existingAdmissionNumbers, rowNumber) => {
     const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     let counter = rowNumber;
@@ -357,7 +824,7 @@ export default function Students({ user }) {
     }
 
     const headers = rows[0].map((value) => `${value || ''}`.trim());
-    const admissionNoIndex = findHeaderIndex(headers, ['admission no', 'admission number', 'admission', 'admission no.', 'adm no', 'adm number']);
+    const admissionNoIndex = findHeaderIndex(headers, ['student id', 'studentid', 'student_id', 'admission no', 'admission number', 'admission', 'admission no.', 'adm no', 'adm number']);
     const fullNameIndex = findHeaderIndex(headers, ['full name', 'student name', 'name', 'full_name']);
     const genderIndex = findHeaderIndex(headers, ['gender', 'sex']);
     const classIndex = findHeaderIndex(headers, ['class', 'class name', 'class_name']);
@@ -374,30 +841,18 @@ export default function Students({ user }) {
       return;
     }
 
-    const existingAdmissionNumbers = new Set();
+    const ensureResult = await ensureClassAndStreamExist(rows, classIndex, streamIndex);
 
-    if (studentSchema.admission_no) {
-      const { data: existingStudents, error: existingStudentsError } = await supabase
-        .from('students')
-        .select('admission_no');
+    const buildCompositeKey = (fullName = '', className = '', parentPhone = '') =>
+      `${fullName.trim().toLowerCase()}|${className.trim().toLowerCase()}|${parentPhone.replace(/\s+/g, '')}`;
 
-      if (existingStudentsError) {
-        throw existingStudentsError;
-      }
-
-      (existingStudents || [])
-        .map((student) => student.admission_no)
-        .filter(Boolean)
-        .forEach((admissionNumber) => existingAdmissionNumbers.add(admissionNumber));
-    }
-
-    const studentsToInsert = [];
+    const preparedRows = [];
     let skippedRows = 0;
 
     for (let i = 1; i < rows.length; i += 1) {
       const cols = rows[i].map((value) => `${value || ''}`.trim());
       const fullName = cols[fullNameIndex]?.trim() || '';
-      const className = buildImportedClassName(cols[classIndex] || '', streamIndex >= 0 ? cols[streamIndex] || '' : '');
+      const className = getCanonicalClassName(cols[classIndex] || '', streamIndex >= 0 ? cols[streamIndex] || '' : '');
       const parentName = cols[parentNameIndex]?.trim() || '';
       const parentPhone = cols[parentPhoneIndex]?.trim() || '';
 
@@ -406,47 +861,188 @@ export default function Students({ user }) {
         continue;
       }
 
-      const suppliedAdmissionNo = studentSchema.admission_no && admissionNoIndex >= 0 ? cols[admissionNoIndex]?.trim() : '';
-      const admissionNo = studentSchema.admission_no
-        ? (suppliedAdmissionNo || generateImportedAdmissionNo(existingAdmissionNumbers, i))
-        : '';
-
-      if (studentSchema.admission_no && suppliedAdmissionNo) {
-        if (existingAdmissionNumbers.has(suppliedAdmissionNo)) {
-          skippedRows += 1;
-          continue;
-        }
-        existingAdmissionNumbers.add(suppliedAdmissionNo);
-      }
-
-      studentsToInsert.push(buildStudentPayload({
-        admission_no: admissionNo,
-        full_name: fullName,
+      preparedRows.push({
+        rowNumber: i,
+        fullName,
+        className,
+        parentName,
+        parentPhone,
+        suppliedAdmissionNo: studentSchema.admission_no && admissionNoIndex >= 0 ? cols[admissionNoIndex]?.trim() : '',
         gender: normalizeGenderValue(genderIndex >= 0 ? cols[genderIndex] || '' : ''),
-        class_name: className,
-        parent_name: parentName,
-        parent_phone: parentPhone,
         date_of_birth: dobIndex >= 0 ? cols[dobIndex] || null : null,
         notes: notesIndex >= 0 ? cols[notesIndex] || '' : ''
-      }));
+      });
     }
 
-    if (studentsToInsert.length === 0) {
+    if (preparedRows.length === 0) {
       alert('❌ No valid student records were found. Make sure your file has Name, Class, Parent Name, and Parent Contact columns.');
       setLoading(false);
       resetInput();
       return;
     }
 
-    const { error } = await supabase
-      .from('students')
-      .insert(studentsToInsert);
+    if (importMode === 'replace-class') {
+      const classesInImport = [...new Set(preparedRows.map((row) => row.className))];
+      const previewClasses = classesInImport.slice(0, 5).join(', ');
+      const moreCount = classesInImport.length > 5 ? ` and ${classesInImport.length - 5} more` : '';
 
-    if (error) {
-      alert('⚠️ Some records may have failed: ' + error.message);
+      const confirmed = window.confirm(
+        `Replace by class will delete current students in ${classesInImport.length} class(es): ${previewClasses}${moreCount}. Continue?`
+      );
+
+      if (!confirmed) {
+        setLoading(false);
+        resetInput();
+        return;
+      }
+
+      let deleteResult;
+      if (studentSchema.class_name) {
+        deleteResult = await supabase.from('students').delete().in('class_name', classesInImport);
+      } else {
+        deleteResult = await supabase.from('students').delete().in('class', classesInImport);
+      }
+
+      if (deleteResult.error) {
+        alert('❌ Failed to delete students for class replacement: ' + deleteResult.error.message);
+        setLoading(false);
+        resetInput();
+        return;
+      }
+    }
+
+    const existingAdmissionNumbers = new Set();
+    const existingAdmissionNumbersInDb = new Set();
+    const existingByAdmission = new Map();
+    const existingByComposite = new Map();
+
+    const existingFields = ['id'];
+    if (studentSchema.admission_no) existingFields.push('admission_no');
+    if (studentSchema.full_name) existingFields.push('full_name');
+    if (studentSchema.name) existingFields.push('name');
+    if (studentSchema.class_name) existingFields.push('class_name');
+    if (studentSchema.class) existingFields.push('class');
+    if (studentSchema.parent_phone) existingFields.push('parent_phone');
+
+    const { data: existingStudentsAll, error: existingAllError } = await supabase
+      .from('students')
+      .select(existingFields.join(','));
+
+    if (existingAllError) {
+      throw existingAllError;
+    }
+
+    (existingStudentsAll || []).forEach((student) => {
+      const admission = student.admission_no;
+      if (admission) {
+        existingAdmissionNumbers.add(admission);
+        existingAdmissionNumbersInDb.add(admission);
+        existingByAdmission.set(admission, student);
+      }
+
+      const key = buildCompositeKey(
+        student.full_name || student.name || '',
+        student.class_name || student.class || '',
+        student.parent_phone || ''
+      );
+
+      if (key !== '||') {
+        existingByComposite.set(key, student);
+      }
+    });
+
+    const studentsToInsert = [];
+    const studentsToUpdate = [];
+
+    for (const row of preparedRows) {
+      const suppliedAdmissionNo = row.suppliedAdmissionNo;
+      const admissionNo = studentSchema.admission_no
+        ? (suppliedAdmissionNo || generateAdmissionNoFromClass(existingAdmissionNumbers, row.className, row.rowNumber))
+        : '';
+
+      const payload = buildStudentPayload({
+        admission_no: admissionNo,
+        full_name: row.fullName,
+        gender: row.gender,
+        class_name: row.className,
+        parent_name: row.parentName,
+        parent_phone: row.parentPhone,
+        date_of_birth: row.date_of_birth,
+        notes: row.notes,
+        attendance_percentage: 95,
+        category: 'Green'
+      });
+
+      const compositeKey = buildCompositeKey(row.fullName, row.className, row.parentPhone);
+      const matchedByAdmission = admissionNo ? existingByAdmission.get(admissionNo) : null;
+      const matchedByComposite = existingByComposite.get(compositeKey);
+      const matchedStudent = matchedByAdmission || matchedByComposite;
+
+      if (studentSchema.admission_no && suppliedAdmissionNo) {
+        const existsInDb = existingAdmissionNumbersInDb.has(suppliedAdmissionNo);
+
+        if (existsInDb && importMode !== 'replace') {
+          skippedRows += 1;
+          continue;
+        }
+
+        existingAdmissionNumbers.add(suppliedAdmissionNo);
+      }
+
+      if (matchedStudent) {
+        if (importMode === 'replace') {
+          studentsToUpdate.push({ id: matchedStudent.id, payload });
+        } else {
+          skippedRows += 1;
+        }
+      } else {
+        studentsToInsert.push(payload);
+      }
+    }
+
+    if (studentsToInsert.length === 0 && studentsToUpdate.length === 0) {
+      alert('❌ No valid student records were found. Make sure your file has Name, Class, Parent Name, and Parent Contact columns.');
+      setLoading(false);
+      resetInput();
+      return;
+    }
+
+    let insertError = null;
+    if (studentsToInsert.length > 0) {
+      const { error } = await supabase
+        .from('students')
+        .insert(studentsToInsert);
+      insertError = error;
+    }
+
+    let updatedCount = 0;
+    let updateError = null;
+    if (studentsToUpdate.length > 0) {
+      for (const item of studentsToUpdate) {
+        const { error } = await supabase
+          .from('students')
+          .update(item.payload)
+          .eq('id', item.id);
+
+        if (error) {
+          updateError = error;
+          break;
+        }
+
+        updatedCount += 1;
+      }
+    }
+
+    if (insertError || updateError) {
+      alert('⚠️ Some records may have failed: ' + (insertError?.message || updateError?.message));
     } else {
-      const skippedMessage = skippedRows > 0 ? ` ${skippedRows} row(s) were skipped because they were incomplete or duplicates.` : '';
-      alert(`✅ Successfully imported ${studentsToInsert.length} students!${skippedMessage}`);
+      const skippedMessage = skippedRows > 0 ? ` ${skippedRows} row(s) were skipped.` : '';
+      const updateMessage = updatedCount > 0 ? ` ${updatedCount} record(s) replaced.` : '';
+      const replacedClassMessage = importMode === 'replace-class' ? ' Class roster replacement completed.' : '';
+      const classCreateMessage = ensureResult.classesCreated > 0 ? ` ${ensureResult.classesCreated} class(es) auto-created.` : '';
+      const streamCreateMessage = ensureResult.streamsCreated > 0 ? ` ${ensureResult.streamsCreated} stream(s) auto-created.` : '';
+      const classUpdateMessage = ensureResult.classUpdates > 0 ? ` ${ensureResult.classUpdates} class(es) updated to use streams.` : '';
+      alert(`✅ Import complete. ${studentsToInsert.length} new student(s) added.${updateMessage}${skippedMessage}${replacedClassMessage}${classCreateMessage}${streamCreateMessage}${classUpdateMessage}`);
     }
 
     await loadStudents();
@@ -460,7 +1056,7 @@ export default function Students({ user }) {
       : filteredStudents;
     
     const csv = [
-      ['Admission No', 'Full Name', 'Gender', 'Class', 'Parent Name', 'Parent Phone', 'DOB', 'Category'].join(','),
+      ['Student ID', 'Full Name', 'Gender', 'Class', 'Parent Name', 'Parent Phone', 'DOB', 'Category'].join(','),
       ...dataToExport.map(s => [
         s.admission_no,
         s.full_name,
@@ -469,7 +1065,7 @@ export default function Students({ user }) {
         s.parent_name,
         s.parent_phone,
         s.date_of_birth || '',
-        getCategory(s.attendance_percentage || 0)
+        getCategoryFromStudent(s)
       ].join(','))
     ].join('\n');
     
@@ -490,11 +1086,11 @@ export default function Students({ user }) {
     pdfContent += `Date: ${new Date().toLocaleDateString()}\n`;
     pdfContent += '='.repeat(100) + '\n\n';
     
-    pdfContent += 'Admission No | Full Name | Gender | Class | Parent Name | Parent Phone | Category\n';
+    pdfContent += 'Student ID | Full Name | Gender | Class | Parent Name | Parent Phone | Category\n';
     pdfContent += '-'.repeat(100) + '\n';
     
     dataToExport.forEach(s => {
-      pdfContent += `${s.admission_no} | ${s.full_name} | ${s.gender} | ${s.class_name} | ${s.parent_name} | ${s.parent_phone} | ${getCategory(s.attendance_percentage || 0)}\n`;
+      pdfContent += `${s.admission_no} | ${s.full_name} | ${s.gender} | ${s.class_name} | ${s.parent_name} | ${s.parent_phone} | ${getCategoryFromStudent(s)}\n`;
     });
     
     const blob = new Blob([pdfContent], { type: 'text/plain' });
@@ -506,6 +1102,12 @@ export default function Students({ user }) {
   };
 
   const handleImport = async (e) => {
+    if (!isAdmin) {
+      alert('Only admin can import students.');
+      e.target.value = '';
+      return;
+    }
+
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -588,11 +1190,30 @@ export default function Students({ user }) {
     }
   };
 
+  const selectFilteredStudents = () => {
+    setSelectedStudents(filteredStudents.map((student) => student.id));
+  };
+
+  const clearSelectedStudents = () => {
+    setSelectedStudents([]);
+  };
+
+  const deleteFilteredStudents = async () => {
+    if (filteredStudents.length === 0) return;
+
+    if (window.confirm(`Delete all ${filteredStudents.length} students in current filter?`)) {
+      const ids = filteredStudents.map((student) => student.id);
+      await supabase.from('students').delete().in('id', ids);
+      setSelectedStudents([]);
+      loadStudents();
+    }
+  };
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h2 style={{ fontSize: '20px', fontWeight: '700' }}>Students</h2>
-        {user.role === 'admin' && (
+        {canManageStudents && (
           <button className="btn btn-primary" onClick={() => setShowModal(true)}>
             <Plus size={18} />
             Add Student
@@ -612,9 +1233,21 @@ export default function Students({ user }) {
             style={{ paddingLeft: '40px' }}
           />
         </div>
-        <select className="form-input" value={filterClass} onChange={(e) => setFilterClass(e.target.value)} style={{ width: '150px' }}>
+        <select
+          className="form-input"
+          value={filterClass}
+          onChange={(e) => {
+            setFilterClass(e.target.value);
+            setFilterStream('');
+          }}
+          style={{ width: '170px' }}
+        >
           <option value="">All Classes</option>
-          {[...new Set(students.map(s => s.class_name).filter(Boolean))].map(c => <option key={c} value={c}>{c}</option>)}
+          {classFilterOptions.map((className) => <option key={className} value={className}>{className}</option>)}
+        </select>
+        <select className="form-input" value={filterStream} onChange={(e) => setFilterStream(e.target.value)} style={{ width: '170px' }}>
+          <option value="">All Streams</option>
+          {streamFilterOptions.map((streamName) => <option key={streamName} value={streamName}>{streamName}</option>)}
         </select>
         <select className="form-input" value={filterGender} onChange={(e) => setFilterGender(e.target.value)} style={{ width: '120px' }}>
           <option value="">All Genders</option>
@@ -635,15 +1268,44 @@ export default function Students({ user }) {
           <Download size={18} />
           Export Text
         </button>
-        <label className="btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', cursor: 'pointer' }}>
-          <Upload size={18} />
-          Import Excel/CSV
-          <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImport} style={{ display: 'none' }} />
-        </label>
-        <div style={{ display: 'flex', alignItems: 'center', color: 'var(--text-gray)', fontSize: '12px', padding: '0 4px' }}>
-          Accepts Excel or CSV with: Name, Class, Stream, Parent Contact. School ID is optional.
-        </div>
-        {selectedStudents.length > 0 && user.role === 'admin' && (
+        {canManageStudents && (
+          <label className="btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', cursor: 'pointer' }}>
+            <Upload size={18} />
+            Import Excel/CSV
+            <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImport} style={{ display: 'none' }} />
+          </label>
+        )}
+        {canManageStudents && (
+          <select className="form-input" value={importMode} onChange={(e) => setImportMode(e.target.value)} style={{ width: '210px' }}>
+            <option value="add">Import Mode: Add only</option>
+            <option value="replace">Import Mode: Replace matching</option>
+            <option value="replace-class">Import Mode: Replace by class</option>
+          </select>
+        )}
+        {canManageStudents && (
+          <div style={{ display: 'flex', alignItems: 'center', color: 'var(--text-gray)', fontSize: '12px', padding: '0 4px' }}>
+            Accepts Excel or CSV with: Name, Class, Stream, Parent Contact. Student ID is optional (auto-generated). New students start as Green.
+          </div>
+        )}
+        {canManageStudents && filteredStudents.length > 0 && (
+          <button className="btn-secondary" onClick={selectFilteredStudents} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px' }}>
+            <CheckSquare size={18} />
+            Select Filtered ({filteredStudents.length})
+          </button>
+        )}
+        {canManageStudents && selectedStudents.length > 0 && (
+          <button className="btn-secondary" onClick={clearSelectedStudents} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px' }}>
+            <Square size={18} />
+            Clear Selection
+          </button>
+        )}
+        {canManageStudents && filteredStudents.length > 0 && (
+          <button className="btn-secondary" onClick={deleteFilteredStudents} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: '#fff1f2', color: '#be123c' }}>
+            <Trash2 size={18} />
+            Delete Filtered
+          </button>
+        )}
+        {selectedStudents.length > 0 && canManageStudents && (
           <button className="btn-secondary" onClick={bulkDelete} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: '#fee2e2', color: '#dc2626' }}>
             <Trash2 size={18} />
             Delete ({selectedStudents.length})
@@ -655,21 +1317,21 @@ export default function Students({ user }) {
         <table className="table">
           <thead>
             <tr>
-              {user.role === 'admin' && (
+              {canManageStudents && (
                 <th style={{ width: '40px' }}>
                   <button onClick={toggleSelectAll} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
                     {selectedStudents.length === filteredStudents.length && filteredStudents.length > 0 ? <CheckSquare size={18} /> : <Square size={18} />}
                   </button>
                 </th>
               )}
-              <th>School ID</th>
+              <th>Student ID</th>
               <th>Full Name</th>
               <th>Gender</th>
               <th>Class</th>
               <th>Parent Name</th>
               <th>Parent Phone</th>
               <th>Category</th>
-              {user.role === 'admin' && <th>Actions</th>}
+              {canManageStudents && <th>Actions</th>}
             </tr>
           </thead>
           <tbody>
@@ -686,23 +1348,23 @@ export default function Students({ user }) {
                 </td>
               </tr>
             ) : (
-              filteredStudents.map((student, index) => (
+              filteredStudents.map(student => (
                 <tr key={student.id}>
-                  {user.role === 'admin' && (
+                  {canManageStudents && (
                     <td>
                       <button onClick={() => toggleSelect(student.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
                         {selectedStudents.includes(student.id) ? <CheckSquare size={18} color="#1e40af" /> : <Square size={18} />}
                       </button>
                     </td>
                   )}
-                  <td>{getSchoolId(student, index)}</td>
+                  <td>{student.admission_no}</td>
                   <td style={{ fontWeight: '600' }}>{student.full_name}</td>
                   <td>{student.gender}</td>
                   <td>{student.class_name}</td>
                   <td>{student.parent_name || '-'}</td>
                   <td>{student.parent_phone}</td>
-                  <td>{getCategoryBadge(student.attendance_percentage || 0)}</td>
-                  {user.role === 'admin' && (
+                  <td>{getCategoryBadgeForStudent(student)}</td>
+                  {canManageStudents && (
                     <td>
                       <button className="btn-secondary" style={{ marginRight: '8px', padding: '6px 12px' }} onClick={() => handleEdit(student)}>
                         <Edit size={16} />
@@ -731,14 +1393,13 @@ export default function Students({ user }) {
             <form onSubmit={handleSubmit}>
               {studentSchema.admission_no && (
               <div className="form-group">
-                <label className="form-label">School ID *</label>
+                <label className="form-label">Student ID (Optional)</label>
                 <input
                   type="text"
                   className="form-input"
                   value={formData.admission_no}
                   onChange={(e) => setFormData({...formData, admission_no: e.target.value})}
-                  placeholder="JICO/0001"
-                  required
+                  placeholder="Auto-generated if left blank"
                   disabled={editingStudent}
                 />
               </div>
@@ -793,11 +1454,14 @@ export default function Students({ user }) {
                   required
                 >
                   <option value="">Select class</option>
-                  {classes.map(classItem => (
+                  {classes
+                    .filter((classItem) => user.role === 'admin' || assignedClasses.some((assignedClass) => matchesAnyAssignedClass(assignedClass, [classItem.name])))
+                    .map(classItem => (
                     <React.Fragment key={classItem.id}>
                       {classItem.has_streams ? (
                         streams
                           .filter(s => s.class_id === classItem.id)
+                          .filter((stream) => user.role === 'admin' || matchesAnyAssignedClass(`${classItem.name} ${stream.name}`, assignedClasses))
                           .map(stream => (
                             <option key={stream.id} value={`${classItem.name} ${stream.name}`}>
                               {classItem.name} {stream.name}
