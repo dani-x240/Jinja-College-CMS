@@ -81,7 +81,7 @@ export default function Sidebar({ collapsed, setCollapsed, activeTab, setActiveT
   return (
     <div className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       <div className="sidebar-header">
-        <div className="sidebar-title">Jinja College cmc</div>
+        <div className="sidebar-title">Jinja College CMS</div>
         <button className="hamburger-btn" onClick={() => setCollapsed(!collapsed)}>
           <Menu size={20} />
         </button>
